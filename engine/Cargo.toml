@@ -1,0 +1,17 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ash = "0.32.1"
+objc = "0.2.7"
+winit = "0.25.0"
+gui = { path = "../gui" }
+cgci = { path = "../cgci" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.24.0"
+metal = "0.23.0"

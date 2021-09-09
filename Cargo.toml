@@ -1,0 +1,8 @@
+[workspace]
+
+members = [
+    "paint-app",
+    "engine",
+    "gui",
+    "cgci",
+]
