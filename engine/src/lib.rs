@@ -1,4 +1,4 @@
-use ash::vk;
+use ash::{vk, vk_make_version};
 use ash::{Instance, Entry, Device};
 use ash::version::{EntryV1_0, DeviceV1_0, InstanceV1_0, InstanceV1_1};
 use ash::extensions::khr::{Surface, Swapchain};
@@ -13,17 +13,21 @@ mod platforms;
 mod validation;
 mod pipeline;
 
-const APPLICATION_VERSION: u32 = vk::make_version(1, 0, 0);
-const ENGINE_VERSION: u32 = vk::make_version(1, 0, 0);
-const API_VERSION: u32 = vk::make_version(1, 2, 183);
+const APPLICATION_VERSION: u32 = vk_make_version!(1, 0, 0);
+const ENGINE_VERSION: u32 = vk_make_version!(1, 0, 0);
+const API_VERSION: u32 = vk_make_version!(1, 2, 183);
 
 const ENGINE_NAME: &str = "PaintGraphicsEngine";
+
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
 pub struct VulkanEngine {
     entry: Entry,
     instance: Instance,
     device: Device,
     device_index: u32,
+    graphics_queue: vk::Queue,
+    present_queue: vk::Queue,
     surface_loader: Surface,
     surface: vk::SurfaceKHR,
     validation_layers_enabled: bool,
@@ -40,6 +44,11 @@ pub struct VulkanEngine {
     pipeline: vk::Pipeline,
     render_pass: vk::RenderPass,
     command_buffers: Vec<vk::CommandBuffer>,
+    command_pool: vk::CommandPool,
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    in_flight_fences: Vec<vk::Fence>,
+    current_frame: usize,
 }
 
 impl VulkanEngine {
@@ -52,36 +61,86 @@ impl VulkanEngine {
             validation_layers
         );
         let surface_bundle = VulkanEngine::create_surface(&entry, &instance, &window);
-        let device_bundle = VulkanEngine::create_device(&instance, validation_layers, &surface_bundle.surface_loader, surface_bundle.surface);
-        let swapchain_bundle = VulkanEngine::create_swapchain(&device_bundle, &instance, &surface_bundle);
-        let render_pass = pipeline::create_render_pass(&device_bundle.logical_device, swapchain_bundle.swapchain_format);
+        let device_bundle = VulkanEngine::create_device(
+            &instance,
+            validation_layers,
+            &surface_bundle.surface_loader,
+            surface_bundle.surface,
+        );
+        let swapchain_bundle = VulkanEngine::create_swapchain(
+            &device_bundle,
+            &instance,
+            &surface_bundle,
+        );
+        let render_pass = pipeline::create_render_pass(
+            &device_bundle.logical_device,
+            swapchain_bundle.swapchain_format,
+        );
+
+        let swapchain_image_views = VulkanEngine::create_image_views(
+            &device_bundle.logical_device,
+            swapchain_bundle.swapchain_format,
+            &swapchain_bundle.swapchain_images,
+        );
+
+        let (pipeline_layout, pipeline) = pipeline::create_graphics_pipeline(
+            &device_bundle.logical_device,
+            swapchain_bundle.swapchain_extent,
+            render_pass,
+        );
+
+        let framebuffers = VulkanEngine::create_framebuffers(
+            &device_bundle.logical_device,
+            render_pass,
+            &swapchain_image_views,
+            swapchain_bundle.swapchain_extent,
+        );
+
+        let command_bundle = VulkanEngine::create_command_buffers(
+            &device_bundle.logical_device,
+            device_bundle.physical_device_index,
+            pipeline,
+            &framebuffers,
+            render_pass,
+            swapchain_bundle.swapchain_extent,
+        );
+
+        let sync_bundle = VulkanEngine::create_sync_objects(&device_bundle.logical_device);
+
         Self {
-            entry: entry,
-            instance: instance,
+            entry,
+            instance,
             device: device_bundle.logical_device,
+            graphics_queue: device_bundle.queue,
+            present_queue: device_bundle.present_queue,
             device_index: device_bundle.physical_device_index,
             surface_loader: surface_bundle.surface_loader,
             surface: surface_bundle.surface,
             validation_layers_enabled: validation_layers,
-            debug_utils_loader: debug_utils_loader,
-            debug_messenger: debug_messenger,
+            debug_utils_loader,
+            debug_messenger,
             swapchain_loader: swapchain_bundle.swapchain_loader,
             swapchain: swapchain_bundle.swapchain,
             swapchain_format: swapchain_bundle.swapchain_format,
             swapchain_images: swapchain_bundle.swapchain_images,
             swapchain_extent: swapchain_bundle.swapchain_extent,
-            swapchain_imageviews: vec![],
-            swapchain_framebuffers: vec![],
-            pipeline_layout: vk::PipelineLayout::null(),
-            pipeline: vk::Pipeline::null(),
-            render_pass: render_pass,
-            command_buffers: vec![],
+            swapchain_imageviews: swapchain_image_views,
+            swapchain_framebuffers: framebuffers,
+            pipeline_layout,
+            pipeline,
+            render_pass,
+            command_buffers: command_bundle.command_buffers,
+            command_pool: command_bundle.command_pool,
+            image_available_semaphores: sync_bundle.image_available_semaphores,
+            render_finished_semaphores: sync_bundle.render_finished_semaphores,
+            in_flight_fences: sync_bundle.inflight_fences,
+            current_frame: 1,
         }
     }
 
     fn setup_debug_utils(
-        entry: &ash::Entry,
-        instance: &ash::Instance,
+        entry: &Entry,
+        instance: &Instance,
         validation_layers_enabled: bool
     ) -> (ash::extensions::ext::DebugUtils, vk::DebugUtilsMessengerEXT) {
         let debug_utils_loader = ash::extensions::ext::DebugUtils::new(entry, instance);
@@ -170,7 +229,7 @@ impl VulkanEngine {
                                     *device,
                                     index as u32,
                                     surface,
-                                ).unwrap()
+                                )
                             };
                         match supports_graphic_and_surface {
                             true => match device_properties.device_type {
@@ -231,6 +290,12 @@ impl VulkanEngine {
                 .create_device(physical_device, &device_create_info, None)
                 .unwrap();
             let present_queue = logical_device.get_device_queue(queue_index as u32, 0);
+
+            //
+            // let graphics_queue =
+            //     unsafe { device_bundle.  device.get_device_queue(family_indices.graphics_family.unwrap(), 0) };
+            // let present_queue =
+            //     unsafe { device.get_device_queue(family_indices.present_family.unwrap(), 0) };
 
             DeviceBundle {
                 physical_device: physical_device,
@@ -310,7 +375,7 @@ impl VulkanEngine {
                 .get_swapchain_images(swapchain)
                 .expect("Failed to fetch swapchain images.");
             let extent = match surface_capabilities.current_extent.width {
-                std::u32::MAX => vk::Extent2D {
+                u32::MAX => vk::Extent2D {
                     width: surface_bundle.width,
                     height: surface_bundle.height,
                 },
@@ -327,10 +392,15 @@ impl VulkanEngine {
         }
     }
 
-    fn create_image_view(&self, image: vk::Image, view_type: vk::ImageViewType) -> vk::ImageView {
+    fn create_image_view(
+        device: &Device,
+        swapchain_format: vk::Format,
+        image: vk::Image,
+        view_type: vk::ImageViewType
+    ) -> vk::ImageView {
         let create_info = vk::ImageViewCreateInfo::builder()
             .view_type(view_type)
-            .format(self.swapchain_format)
+            .format(swapchain_format)
             .subresource_range(
                 vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -351,57 +421,82 @@ impl VulkanEngine {
             .image(image)
             .build();
         unsafe {
-            self.device
+            device
                 .create_image_view(&create_info, None)
                 .unwrap()
         }
     }
 
-    fn create_image_views(&mut self) -> Vec<vk::ImageView>{
-        let swapchain_image_views = vec![];
-        for &image in self.swapchain_images.iter() {
-            let image_view = self.create_image_view(image, vk::ImageViewType::TYPE_2D);
-            self.swapchain_imageviews.push(image_view)
+    fn create_image_views(
+        device: &Device,
+        surface_format: vk::Format,
+        swapchain_images: &Vec<vk::Image>,
+    ) -> Vec<vk::ImageView>{
+        let mut swapchain_image_views = vec![];
+        for &image in swapchain_images.iter() {
+            let image_view = VulkanEngine::create_image_view(
+                device,
+                surface_format,
+                image,
+                vk::ImageViewType::TYPE_2D,
+            );
+            swapchain_image_views.push(image_view)
         }
         swapchain_image_views
     }
 
-    fn create_framebuffers(&mut self) {
-        for &imageview in self.swapchain_imageviews.iter() {
+    fn create_framebuffers(
+        device: &Device,
+        render_pass: vk::RenderPass,
+        swapchain_imageviews: &Vec<vk::ImageView>,
+        swapchain_extent: vk::Extent2D,
+    ) -> Vec<vk::Framebuffer> {
+        let mut swapchain_framebuffers = vec![];
+
+        for &imageview in swapchain_imageviews.iter() {
             let attachments = &[imageview];
             let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
-                .render_pass(self.render_pass)
+                .render_pass(render_pass)
                 .attachments(attachments)
-                .width(self.swapchain_extent.width)
-                .height(self.swapchain_extent.height);
+                .width(swapchain_extent.width)
+                .height(swapchain_extent.height);
 
             let framebuffer = unsafe {
-                self.device.create_framebuffer(&framebuffer_create_info, None)
+                device.create_framebuffer(&framebuffer_create_info, None)
                     .expect("Failed to create framebuffer!")
             };
-            self.swapchain_framebuffers.push(framebuffer);
+            swapchain_framebuffers.push(framebuffer);
         }
+
+        swapchain_framebuffers
     }
 
-    fn create_command_pool(&self) -> vk::CommandPool {
+    fn create_command_pool(device: &Device, device_index: u32) -> vk::CommandPool {
         let command_pool_create_info = vk::CommandPoolCreateInfo::builder()
-            .queue_family_index(self.device_index)
+            .queue_family_index(device_index)
             .flags(vk::CommandPoolCreateFlags::empty());
 
         unsafe {
-            self.device
+            device
                 .create_command_pool(&command_pool_create_info, None)
                 .unwrap()
         }
     }
 
-    fn create_command_buffers(&mut self) {
-        let command_pool = self.create_command_pool();
+    fn create_command_buffers(
+        device: &Device,
+        device_index: u32,
+        pipeline: vk::Pipeline,
+        swapchain_framebuffers: &Vec<vk::Framebuffer>,
+        render_pass: vk::RenderPass,
+        swapchain_extent: vk::Extent2D,
+    ) -> CommandBundle {
+        let command_pool = VulkanEngine::create_command_pool(device, device_index);
         let command_buffer_allocate_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
-            .command_buffer_count(self.command_buffers.len() as u32);
+            .command_buffer_count(swapchain_framebuffers.len() as u32);
         let command_buffers = unsafe {
-            self.device
+            device
                 .allocate_command_buffers(&command_buffer_allocate_info)
                 .expect("Failed to create command buffer!")
         };
@@ -409,16 +504,16 @@ impl VulkanEngine {
         for (i, &cb) in command_buffers.iter().enumerate() {
             let cb_begin_info = vk::CommandBufferBeginInfo::builder();
             unsafe {
-                self.device.begin_command_buffer(cb, &cb_begin_info)
+                device.begin_command_buffer(cb, &cb_begin_info)
                     .expect("Failed to start command buffer!");
             }
 
             let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
-                .render_pass(self.render_pass)
-                .framebuffer(self.swapchain_framebuffers[i])
+                .render_pass(render_pass)
+                .framebuffer(swapchain_framebuffers[i])
                 .render_area(
                     vk::Rect2D::builder()
-                        .extent(self.swapchain_extent)
+                        .extent(swapchain_extent)
                         .build()
                 )
                 .clear_values(
@@ -431,33 +526,136 @@ impl VulkanEngine {
                     ]
                 );
             unsafe {
-                self.device.cmd_begin_render_pass(cb, &render_pass_begin_info, vk::SubpassContents::INLINE);
-                self.device.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-                self.device.cmd_draw(cb, 4, 1, 0, 0);
-                self.device.cmd_end_render_pass(cb);
-                self.device.end_command_buffer(cb)
+                device.cmd_begin_render_pass(
+                    cb,
+                    &render_pass_begin_info,
+                    vk::SubpassContents::INLINE,
+                );
+                device.cmd_bind_pipeline(
+                    cb,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline,
+                );
+                device.cmd_draw(cb, 4, 1, 0, 0);
+                device.cmd_end_render_pass(cb);
+                device.end_command_buffer(cb)
                     .expect("Failed to end command buffer!");
             }
-            self.command_buffers.push(cb);
+        }
+        CommandBundle {
+            command_buffers,
+            command_pool,
         }
     }
 
-    pub fn initialize(mut self) -> Self {
-        self.create_image_views();
-        let (pipeline_layout, pipeline) = pipeline::create_graphics_pipeline(
-            &self.device, 
-            self.swapchain_extent,
-            self.render_pass);
-        self.pipeline_layout = pipeline_layout;
-        self.pipeline = pipeline;
-        self.create_framebuffers();
-        self
+    fn create_sync_objects(device: &Device) -> SyncBundle {
+        let semaphore_create_info = vk::SemaphoreCreateInfo::builder().build();
+        let fence_create_info = vk::FenceCreateInfo::builder()
+            .flags(vk::FenceCreateFlags::SIGNALED)
+            .build();
+
+        let mut sync_bundle = SyncBundle {
+            image_available_semaphores: vec![],
+            render_finished_semaphores: vec![],
+            inflight_fences: vec![],
+        };
+
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            unsafe {
+                let image_available_semaphore = device.create_semaphore(
+                    &semaphore_create_info,
+                    None,
+                ).expect("Failed to create semaphore for image availability");
+
+                let render_finished_semaphore = device.create_semaphore(
+                    &semaphore_create_info,
+                    None,
+                ).expect("Failed to create semaphore for finished rendering");
+
+                let inflight_fence = device.create_fence(
+                    &fence_create_info,
+                    None,
+                ).expect("Failed to create fence for inflight images");
+
+                sync_bundle.image_available_semaphores.push(image_available_semaphore);
+                sync_bundle.render_finished_semaphores.push(render_finished_semaphore);
+                sync_bundle.inflight_fences.push(inflight_fence);
+            }
+        }
+
+        sync_bundle
     }
 }
 
 impl Draw for VulkanEngine {
     fn draw_frame(&mut self) {
+        let wait_fences = [self.in_flight_fences[self.current_frame]];
 
+        let (image_index, _is_sub_optimal) = unsafe {
+            self.device
+                .wait_for_fences(&wait_fences, true, std::u64::MAX)
+                .expect("Failed to wait for Fence!");
+
+            self.swapchain_loader
+                .acquire_next_image(
+                    self.swapchain,
+                    std::u64::MAX,
+                    self.image_available_semaphores[self.current_frame],
+                    vk::Fence::null(),
+                )
+                .expect("Failed to acquire next image.")
+        };
+
+        let wait_semaphores = [self.image_available_semaphores[self.current_frame]];
+        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+        let signal_semaphores = [self.render_finished_semaphores[self.current_frame]];
+
+        let submit_infos = [vk::SubmitInfo {
+            s_type: vk::StructureType::SUBMIT_INFO,
+            p_next: ptr::null(),
+            wait_semaphore_count: wait_semaphores.len() as u32,
+            p_wait_semaphores: wait_semaphores.as_ptr(),
+            p_wait_dst_stage_mask: wait_stages.as_ptr(),
+            command_buffer_count: 1,
+            p_command_buffers: &self.command_buffers[image_index as usize],
+            signal_semaphore_count: signal_semaphores.len() as u32,
+            p_signal_semaphores: signal_semaphores.as_ptr(),
+        }];
+
+        unsafe {
+            self.device
+                .reset_fences(&wait_fences)
+                .expect("Failed to reset Fence!");
+
+            self.device
+                .queue_submit(
+                    self.graphics_queue,
+                    &submit_infos,
+                    self.in_flight_fences[self.current_frame],
+                )
+                .expect("Failed to execute queue submit.");
+        }
+
+        let swapchains = [self.swapchain];
+
+        let present_info = vk::PresentInfoKHR {
+            s_type: vk::StructureType::PRESENT_INFO_KHR,
+            p_next: ptr::null(),
+            wait_semaphore_count: 1,
+            p_wait_semaphores: signal_semaphores.as_ptr(),
+            swapchain_count: 1,
+            p_swapchains: swapchains.as_ptr(),
+            p_image_indices: &image_index,
+            p_results: ptr::null_mut(),
+        };
+
+        unsafe {
+            self.swapchain_loader
+                .queue_present(self.present_queue, &present_info)
+                .expect("Failed to execute queue present.");
+        }
+
+        self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 }
 
@@ -465,6 +663,21 @@ impl Drop for VulkanEngine {
     fn drop(&mut self) {
         unsafe {
             self.device.device_wait_idle().unwrap();
+
+            for i in 0..MAX_FRAMES_IN_FLIGHT {
+                self.device
+                    .destroy_semaphore(self.image_available_semaphores[i], None);
+                self.device
+                    .destroy_semaphore(self.render_finished_semaphores[i], None);
+                self.device.destroy_fence(self.in_flight_fences[i], None);
+            }
+
+            self.device.destroy_command_pool(self.command_pool, None);
+
+            for &framebuffer in self.swapchain_framebuffers.iter() {
+                self.device.destroy_framebuffer(framebuffer, None);
+            }
+
             self.device.destroy_pipeline(self.pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
@@ -489,8 +702,8 @@ impl Drop for VulkanEngine {
 struct DeviceBundle {
     pub physical_device: vk::PhysicalDevice,
     pub physical_device_index: u32,
-    pub logical_device: ash::Device,
-    pub present_queue: ash::vk::Queue,
+    pub logical_device: Device,
+    pub present_queue: vk::Queue,
     pub queue: vk::Queue,
 }
 
@@ -507,6 +720,17 @@ struct SwapchainBundle {
     swapchain_format: vk::Format,
     swapchain_images: Vec<vk::Image>,
     swapchain_extent: vk::Extent2D,
+}
+
+struct SyncBundle {
+    image_available_semaphores: Vec<vk::Semaphore>,
+    render_finished_semaphores: Vec<vk::Semaphore>,
+    inflight_fences: Vec<vk::Fence>
+}
+
+struct CommandBundle {
+    command_buffers: Vec<vk::CommandBuffer>,
+    command_pool: vk::CommandPool,
 }
 
 #[derive(Clone)]

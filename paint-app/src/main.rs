@@ -17,7 +17,6 @@ fn main() {
     let main_window = gui::MainWindow::new(APP_NAME, 800, 600);
     let engine: Box<dyn Draw> = Box::new(
         VulkanEngine::new(APP_NAME, validation_layers, &main_window)
-            .initialize()
     );
     println!("{}", main_window.get_details());
     gui::start_main_loop(main_window.event_loop, engine);

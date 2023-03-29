@@ -49,7 +49,8 @@ impl<'prc> MainWindow<'prc> {
         format!("The window with title: {} and dimensions of {}x{} initiated",
             self.window_title,
             self.window_width,
-            self.window_height)
+            self.window_height,
+        )
     }
 }
 

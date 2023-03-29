@@ -16,7 +16,7 @@ use cocoa::appkit::{NSView, NSWindow};
 #[cfg(target_os = "macos")]
 use cocoa::base::id as cocoa_id;
 #[cfg(target_os = "macos")]
-use metal::{MetalLayer};
+use metal::CoreAnimationLayer;
 #[cfg(target_os = "macos")]
 use objc::runtime::YES;
 
@@ -48,6 +48,7 @@ pub fn required_extension_names() -> Vec<*const i8> {
     ]
 }
 // ------------------------------------------------------------------------
+
 // create surface ---------------------------------------------------------
 #[cfg(all(unix, not(target_os = "android"), not(target_os = "macos")))]
 pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
@@ -84,7 +85,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
 
     let wnd: cocoa_id = mem::transmute(window.ns_window());
 
-    let layer = MetalLayer::new();
+    let layer = CoreAnimationLayer::new();
 
     layer.set_edge_antialiasing_mask(0);
     layer.set_presents_with_transaction(false);
@@ -97,7 +98,7 @@ pub unsafe fn create_surface<E: EntryV1_0, I: InstanceV1_0>(
     view.setWantsLayer(YES);
 
     let create_info = vk::MacOSSurfaceCreateInfoMVK {
-        s_type: vk::StructureType::MACOS_SURFACE_CREATE_INFO_MVK,
+        s_type: vk::StructureType::MACOS_SURFACE_CREATE_INFO_M,
         p_next: ptr::null(),
         flags: Default::default(),
         p_view: window.ns_view() as *const c_void,
